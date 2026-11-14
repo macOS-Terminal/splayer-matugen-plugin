@@ -214,6 +214,22 @@ macOS / FreeBSD / Windows：仅完成代码级适配与路径模拟验证，未�
   echo '{"seed":"#22cc88"}' > ~/.cache/matugen/splayer-next.json
   ```
 
+## 更新日志
+
+### 1.1.0
+- 修复 inspector 注入异常时未关闭通道、导致 `9229` 被永久占用、后续注入全部失败的问题
+- 修复 `installAgent` 中的未定义变量导致插件在部分机器上直接失效
+- 修正对 Node inspector 端口的错误假设（被占用时不会自动顺延）
+- 插件头部新增 `@homepage`，指向本仓库
+
+### 1.0.1
+- 完善 macOS / Windows 路径与资源定位（`.app/Contents/Resources`、盘符绝对路径）
+- Windows 状态文件写入增加 `rename` 失败的退化重试
+- 插件更名为「Matugen配色」，下拉框选项改为「Matugen」
+
+### 1.0.0
+- 首个版本：实时跟随 Matugen 配色，主题色来源下拉框新增 Matugen 选项
+
 ## 许可
 
 MIT

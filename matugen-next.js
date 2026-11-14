@@ -1,7 +1,7 @@
 /**
  * @name Matugen配色
  * @id matugen-next
- * @version 1.0.1
+ * @version 1.1.0
  * @description 让 SPlayer-Next 实时跟随 Matugen 生成的配色，并在「主题色来源」下拉框中新增「Matugen」选项。支持 macOS / Linux / FreeBSD / Windows。
  * @author macOS终端
  * @homepage https://github.com/macOS-Terminal/splayer-matugen-plugin
@@ -72,7 +72,7 @@
   /** 日志前缀，便于在 app-data/logs 里检索 */
   const TAG = '[Matugen]';
 
-  const PLUGIN_VERSION = '1.0.1';
+  const PLUGIN_VERSION = '1.1.0';
 
   // ---------------------------------------------------------------------------
   // 0. 沙箱逃逸，拿到宿主 Node 能力
@@ -873,7 +873,39 @@
   }
 
   /** 打开主进程 inspector，注入常驻 agent */
+  /**
+   * 打开主进程 inspector、注入常驻 agent。
+   *
+   * 关键：无论中间哪一步抛异常，都必须把 inspector 关掉。
+   * Node inspector 一旦被 _debugProcess 打开就会常驻监听 9229，
+   * 若因异常跳过 _debugEnd()，该端口会被本进程永久占住，
+   * 之后所有注入都会因为「9229 被占用」而失败（下拉框随之消失）。
+   */
   async function installAgent(payloadCfg, seed, rev) {
+    let opened = false;
+    try {
+      opened = true;
+      return await installAgentOnce(payloadCfg, seed, rev);
+    } catch (err) {
+      debugLog('installAgent threw: ' + String(err && err.stack ? err.stack : err).slice(0, 800));
+      return { ok: false, error: 'install-threw: ' + String(err && err.message) };
+    } finally {
+      if (opened) {
+        // 延迟关闭：立即关闭会掐断正在等待的 evaluate 回复。
+        // 若 agent 已注入成功，它自己也会在 500ms 后调用 _debugEnd（重复调用无害）。
+        setTimeout(() => {
+          try {
+            NODE._debugEnd();
+          } catch (err) {
+            /* 已经关掉了 */
+          }
+        }, 1500);
+      }
+    }
+  }
+
+  /** installAgent 的实际实现（外层负责保证 inspector 一定被关闭） */
+  async function installAgentOnce(payloadCfg, seed, rev) {
     const agentCfg = {
       mainPid: NODE.ppid,
       // 主进程真正的入口脚本（app.asar 内的 out/main/index.js），供 createRequire 建立解析基准。
@@ -921,7 +953,7 @@
     }
     if (!target) return { ok: false, error: 'inspector-target-not-found' };
 
-    debugLog('inspector target port=' + targetPort + ' title=' + String(target.title || '').slice(0, 120));
+    debugLog('inspector target port=' + INSPECTOR_PORT + ' title=' + String(target.title || '').slice(0, 120));
 
     const expression = '(' + String(mainAgent) + ')(' + JSON.stringify(agentCfg) + ')';
     const result = await cdpEvaluate(target.webSocketDebuggerUrl, expression, 30000);
