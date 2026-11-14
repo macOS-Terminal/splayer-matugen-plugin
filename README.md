@@ -128,7 +128,7 @@ SPlayer-Next 内部用 `@material/material-color-utilities`，从**一个种子�
    渲染进程重载后自动补回。**后续换色不再需要开关 inspector。**
 
 注入前会先用 `process.pid` 核对 inspector 目标确实是本应用主进程——
-`9229~9233` 可能被其它 Node/Electron 程序占用，核对不上就改走其它通道，绝不向陌生进程注入代码。
+`9229~9250` 区间可能被其它 Node/Electron 程序占用，核对不上就改走其它通道，绝不向陌生进程注入代码。
 
 ### 主题来源如何扩展
 
@@ -182,8 +182,9 @@ macOS / FreeBSD / Windows：仅完成代码级适配与路径模拟验证，未�
   userData 目录后，需要重新选择一次。
 - 注入用到的 `searchSettings-*.js` 文件名做了前缀匹配与内容特征双重兜底；
   若未来前端构建产物结构大改，可能找不到该模块（此时配色同步仍正常，仅下拉框无 Matugen 选项）。
-- inspector 通道占用 `127.0.0.1:9229`（候选 `9230~9233`）。若这些端口全被占用，
-  则退回「应用需带 `--remote-debugging-port` 启动」的 CDP 模式。
+- inspector 通道固定占用 `127.0.0.1:9229`（Node inspector 的默认端口，被占用时不会自动顺延）。
+  因此若 9229 已被无关进程占用，插件会退回「应用带 `--remote-debugging-port` 启动」的 CDP 模式；
+  若 9229 被应用自身的 `--remote-debugging-port=9229` 占用，建议改用其它调试端口（如 `9223`）。
 - 只读 Matugen 输出文件与播放器状态，除本机回环地址上的调试端口外**不发起任何网络请求**。
 
 ## 卸载

@@ -898,14 +898,15 @@
 
     // 端口可能已被别的 Node/Electron 进程占用（开发工具自己也可能开 inspector），
     // 因此候选 target 必须先回答「你的 pid 是不是我等的主进程」才允许注入。
-    const ports = [9229, 9230, 9231, 9232, 9233];
+    // Node inspector 固定监听 9229；该端口被占用时 _debugProcess 会静默失败，
+    // **不会**自动顺延到其它端口（实测确认）。所以这里只探测 9229，
+    // 但仍做 pid 核对，避免把代码注入到占用该端口的无关进程。
+    const INSPECTOR_PORT = 9229;
     let target = null;
-    let targetPort = 0;
     const probeExpr = 'process.pid';
-    for (let attempt = 0; attempt < 60 && !target; attempt += 1) {
-      for (let index = 0; index < ports.length && !target; index += 1) {
-        const list = await httpJson('http://127.0.0.1:' + ports[index] + '/json/list', 400);
-        if (!Array.isArray(list)) continue;
+    for (let attempt = 0; attempt < 90 && !target; attempt += 1) {
+      const list = await httpJson('http://127.0.0.1:' + INSPECTOR_PORT + '/json/list', 400);
+      if (Array.isArray(list)) {
         for (let entry = 0; entry < list.length && !target; entry += 1) {
           const candidate = list[entry];
           if (!candidate || !candidate.webSocketDebuggerUrl || candidate.type !== 'node') continue;
@@ -914,7 +915,6 @@
           if (!probe || !probe.ok) continue;
           if (Number(probe.value) !== Number(NODE.ppid)) continue;
           target = candidate;
-          targetPort = ports[index];
         }
       }
       if (!target) await sleep(100);
