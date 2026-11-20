@@ -1,7 +1,7 @@
 /**
  * @name Matugen配色
  * @id matugen-next
- * @version 1.1.0
+ * @version 1.1.1
  * @description 让 SPlayer-Next 实时跟随 Matugen 生成的配色，并在「主题色来源」下拉框中新增「Matugen」选项。支持 macOS / Linux / FreeBSD / Windows。
  * @author macOS终端
  * @homepage https://github.com/macOS-Terminal/splayer-matugen-plugin
@@ -72,7 +72,7 @@
   /** 日志前缀，便于在 app-data/logs 里检索 */
   const TAG = '[Matugen]';
 
-  const PLUGIN_VERSION = '1.1.0';
+  const PLUGIN_VERSION = '1.1.1';
 
   // ---------------------------------------------------------------------------
   // 0. 沙箱逃逸，拿到宿主 Node 能力
@@ -610,17 +610,42 @@
       }
     };
 
+    // 应用真实路径：用 Electron 自己的 app.getAppPath()，而不是从 execPath 猜。
+    // 「electron <app.asar>」这种启动方式（第三方 fork / 系统 Electron 打包）下，
+    // execPath 指向 electron 可执行文件，app.asar 完全在别处，纯靠 execPath 推导必然失败。
+    var appPaths = {};
+    try {
+      var appPath = electron.app.getAppPath();
+      appPaths.appPath = appPath;
+      // appPath 通常是 .../app.asar 或 .../app
+      var rendererRoot = appPath;
+      if (/\.asar$/.test(rendererRoot)) {
+        appPaths.assetsDir = path.join(rendererRoot, 'out', 'renderer', 'assets');
+      } else {
+        appPaths.assetsDir = path.join(rendererRoot, 'out', 'renderer', 'assets');
+      }
+    } catch (err) {
+      appPaths.error = String(err && err.message);
+    }
+
     var writeAck = function (payload) {
       try {
         fs.mkdirSync(path.dirname(cfg.ackFile), { recursive: true });
-        fs.writeFileSync(cfg.ackFile, JSON.stringify(payload, null, 2));
+        var merged = payload || {};
+        if (appPaths.appPath && !merged.appPath) merged.appPath = appPaths.appPath;
+        if (appPaths.assetsDir && !merged.assetsDir) merged.assetsDir = appPaths.assetsDir;
+        fs.writeFileSync(cfg.ackFile, JSON.stringify(merged, null, 2));
       } catch (err) {
         /* ignore */
       }
     };
 
-    var inject = async function (win, seed) {
-      var code = '(' + cfg.payloadSrc + ')(' + JSON.stringify(seed || null) + ',' + cfg.payloadCfg + ')';
+    // payloadCfg 允许每次调用时覆盖：插件进程可能在本 agent 装好之后才
+    // 通过 ack 得知真实资源目录并算出 settingsChunk，必须能把新配置送进来，
+    // 否则「下拉框选项」这类依赖 chunk 名的功能会一直用旧（空）配置。
+    var inject = async function (win, seed, payloadCfgJson) {
+      var cfgJson = payloadCfgJson || cfg.payloadCfg;
+      var code = '(' + cfg.payloadSrc + ')(' + JSON.stringify(seed || null) + ',' + cfgJson + ')';
       try {
         return await win.webContents.executeJavaScript(code, true);
       } catch (err) {
@@ -628,7 +653,7 @@
       }
     };
 
-    var applyAll = async function (seed) {
+    var applyAll = async function (seed, payloadCfgJson) {
       var windows = [];
       try {
         windows = electron.BrowserWindow.getAllWindows().filter(isMainWindow);
@@ -637,7 +662,7 @@
       }
       var results = [];
       for (var i = 0; i < windows.length; i++) {
-        results.push(await inject(windows[i], seed));
+        results.push(await inject(windows[i], seed, payloadCfgJson));
       }
       agent.last = results;
       return { windows: windows.length, results: results };
@@ -688,7 +713,8 @@
         if (!state || typeof state.rev !== 'number' || state.rev === agent.rev) return;
         agent.rev = state.rev;
         agent.seed = state.seed;
-        applyAll(state.seed)
+        // state.payloadCfg 由插件进程提供，可能随资源目录修正而更新
+        applyAll(state.seed, state.payloadCfg ? JSON.stringify(state.payloadCfg) : null)
           .then(function (out) {
             writeAck({
               rev: state.rev,
@@ -1277,49 +1303,86 @@
     return null;
   }
 
+  /**
+   * 主进程通过 ack 回报的「真实」渲染资源目录（app.getAppPath() 推导）。
+   * fork / 系统 Electron 打包时 execPath 指向 electron，纯路径猜测会失败，
+   * 这条信息是最可靠的来源。
+   */
+  let reportedAssetsDir = null;
+
+  /** 主进程回报的 resources 根（供 mainEntry 兜底） */
+  let reportedAppPath = null;
+
+  function rememberAppPathsFromAck(ack) {
+    try {
+      if (ack && typeof ack.assetsDir === 'string' && ack.assetsDir) {
+        if (reportedAssetsDir !== ack.assetsDir) {
+          reportedAssetsDir = ack.assetsDir;
+          cachedSettingsChunk = null; // 目录变了要重新找
+          debugLog('ack assetsDir=' + reportedAssetsDir);
+        }
+      }
+      if (ack && typeof ack.appPath === 'string' && ack.appPath) reportedAppPath = ack.appPath;
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
   function findSettingsChunk() {
     if (cachedSettingsChunk !== null) return cachedSettingsChunk;
-    const assetsDir = findRendererAssetsDir();
-    if (!assetsDir) {
-      cachedSettingsChunk = '';
-      return cachedSettingsChunk;
-    }
-    let names = [];
-    try {
-      names = fs.readdirSync(assetsDir).filter((name) => name.endsWith('.js'));
-    } catch (err) {
-      cachedSettingsChunk = '';
-      return cachedSettingsChunk;
-    }
-    // 命名前缀通常稳定
-    const direct = names.find((name) => /^searchSettings-.*\.js$/.test(name));
-    if (direct) {
-      cachedSettingsChunk = direct;
-      return cachedSettingsChunk;
-    }
-    // 版本升级后前缀可能变化，退化为内容特征匹配
-    for (const name of names) {
-      try {
-        const content = fs.readFileSync(join(assetsDir, name), 'utf8');
-        if (content.indexOf('themeSource') >= 0 && content.indexOf('settingsSchema') >= 0) {
-          cachedSettingsChunk = name;
-          return cachedSettingsChunk;
-        }
-      } catch (err) {
-        /* 下一个 */
+
+    // 候选目录：主进程回报的真实路径优先，其次才是基于 execPath 的猜测
+    const dirs = [];
+    if (reportedAssetsDir) dirs.push(reportedAssetsDir);
+    const guess = findRendererAssetsDir();
+    if (guess) dirs.push(guess);
+
+    for (const assetsDir of dirs) {
+      const found = findSettingsChunkInDir(assetsDir);
+      if (found) {
+        cachedSettingsChunk = found;
+        return cachedSettingsChunk;
       }
     }
     cachedSettingsChunk = '';
     return cachedSettingsChunk;
   }
 
+  function findSettingsChunkInDir(assetsDir) {
+    if (!assetsDir) return '';
+    let names = [];
+    try {
+      if (!fs.existsSync(assetsDir)) return '';
+      names = fs.readdirSync(assetsDir).filter((name) => name.endsWith('.js'));
+    } catch (err) {
+      return '';
+    }
+    // 命名前缀通常稳定
+    const direct = names.find((name) => /^searchSettings-.*\.js$/.test(name));
+    if (direct) return direct;
+    // 版本升级后前缀可能变化，退化为内容特征匹配
+    for (const name of names) {
+      try {
+        const content = fs.readFileSync(join(assetsDir, name), 'utf8');
+        if (content.indexOf('themeSource') >= 0 && content.indexOf('settingsSchema') >= 0) return name;
+      } catch (err) {
+        /* 下一个 */
+      }
+    }
+    return '';
+  }
+
   // ---------------------------------------------------------------------------
   // 9. 运行时与主循环
   // ---------------------------------------------------------------------------
 
-  function publishState(seed) {
+  function publishState(seed, payloadCfg) {
     const rev = Date.now();
-    const body = JSON.stringify({ rev: rev, seed: seed, at: rev, plugin: 'matugen-next' }, null, 2);
+    const body = JSON.stringify(
+      { rev: rev, seed: seed, at: rev, plugin: 'matugen-next', payloadCfg: payloadCfg || null },
+      null,
+      2,
+    );
     try {
       fs.mkdirSync(WORK_DIR, { recursive: true });
     } catch (err) {
@@ -1369,7 +1432,11 @@
   function readAck() {
     try {
       const parsed = JSON.parse(fs.readFileSync(ACK_FILE, 'utf8'));
-      if (parsed && typeof parsed.rev === 'number') return parsed;
+      if (parsed && typeof parsed.rev === 'number') {
+        // 顺便吸收主进程回报的真实应用路径（用于定位设置面板 chunk）
+        rememberAppPathsFromAck(parsed);
+        return parsed;
+      }
     } catch (err) {
       /* ignore */
     }
@@ -1388,7 +1455,7 @@
   /** 把种子色送到渲染进程；返回 { ok, transport, value } */
   async function pushSeed(runtime, seed) {
     if (!runtime.settings.enabled) return { ok: false, error: 'disabled' };
-    const rev = publishState(seed);
+    const rev = publishState(seed, runtime.payloadCfg);
 
     // 首次：装 agent（同时完成第一次注入）
     if (!runtime.bridgeReady) {
@@ -1397,6 +1464,39 @@
         runtime.bridgeReady = true;
         runtime.bridgeFailures = 0;
         runtime.lastAckRev = rev;
+        // 首次注入成功后，主进程已把真实应用路径写进 ack；
+        // 立刻读一次，若发现设置面板目录此前没找到，用真实路径重建 payload 配置。
+        try {
+          const ack = readAck();
+          if (ack) rememberAppPathsFromAck(ack);
+          if (cachedSettingsChunk === null || cachedSettingsChunk === '') {
+            cachedSettingsChunk = null;
+            const rebuilt = buildPayloadCfg();
+            if (rebuilt.settingsChunk) {
+              runtime.payloadCfg = rebuilt;
+              debugLog('schema chunk located via appPath: ' + rebuilt.settingsChunk);
+              // 首次注入时还没有 chunk 名，渲染进程里的 schema 补丁没做成。
+              // 不用再开一次 inspector：主进程 agent 已经在轮询 state.json，
+              // 只要发一个带新 payloadCfg 的新 rev，它就会用正确配置重新注入。
+              publishState(seed, runtime.payloadCfg);
+              debugLog('queued re-inject with schema config');
+              const deadline = Date.now() + 5000;
+              while (Date.now() < deadline) {
+                await sleep(250);
+                const fresh = readAck();
+                if (fresh && fresh.rev >= runtime.lastAckRev) {
+                  const applied = (fresh.results || [])[0];
+                  if (applied && applied.schemaPatched) {
+                    debugLog('schema patch confirmed by agent');
+                    return { ok: true, transport: 'agent', value: applied };
+                  }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          debugLog('post-install schema retry failed: ' + String(err && err.message));
+        }
         return { ok: true, transport: 'inspector', value: installed.value };
       }
       runtime.bridgeFailures += 1;
